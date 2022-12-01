@@ -1,0 +1,210 @@
+#!/bin/bash
+#<SHELL STANDARD>
+#-------------HEADER-----------------------------------------------------------|
+#AUTOR
+#  Jefferson Rocha <lrcjefferson@gmail.com>
+#
+#MODIFICACAO
+#  Viciolivre <nestor.junior@gmail.com>
+#
+#PROGRAMA
+#  Lisa
+#
+#VERSÃO
+#  1.2
+#
+#LICENÇA
+#  MIT
+#
+#DESCRIÇÃO
+#  Lisa é um sistema de backup que utiliza o rsync como principal forma de
+#  backup e sincronismo 'Origem/Destino'.
+#  Criada especialmente para fazer backups 'localmente' em dispositivos
+#  removiveis ou não, Pendrives, HD, HD Externo.
+#
+#NOTA
+#  A Lisa não utiliza os nomes de dispositivos, exemplo (/dev/sdb) (/dev/sdc)
+#  ao invés disto é utilizado o UUID do dispositivo.
+#  Com a informação do UUID do dispositivo fica menos sucessivel a falhas
+#  existem vários problemas relacionados principalmente com HD's Externo,
+#  as vezes montamos como /dev/sdb por exemplo, e ao desmontar é trocado para
+#  /dev/sdc, com isto é gerado uma falha no backup, prefira indiciar o UUID.
+#
+#  O UUID do hd será gravado na primeira execução do script
+#  caso queira alterar o UUID faça diretamente no arquivo hd que está na raiz do
+#  diretorio
+#  opcoes do rsync
+#
+# -C, --cvs-exclude - ignora arquivos CVS;
+# -r, --recursive - recursivo;
+# -a, --archive - modo arquivo; igual -rlptgoD (no -H,-A,-X);
+# -z, --compress - comprime durante transferência;
+# -p, --perms - preserva as permissões;
+# -b, --backup - faz backup (veja --suffix & --backup-dir);
+#     --backup-dir=DIR - faz backups dentro da hierarquia DIR;
+#     --suffix=SUFFIX - sufixo de backup (padrão ~ w/o --backup-dir);
+# -u, --update - pula arquivos recentes;
+# -d, --dirs - transfere diretórios sem seu conteúdo, não recursivo;
+# -l, --links - cópia symlinks como symlinks;
+# -L, --copy-links - transforma symlink em sua referência, arquivo ou diretório;
+# -X, --xattrs - preserva os atributos estendidos;
+#     --exclude=PATTERN - exclui o arquivo que coincide com o PATTERN;
+# -t, --times - preserva a data de modificação;
+# -v, --verbose - modo verboso.
+#
+#CHANGELOG:
+#
+#PARA RESTAURAR:
+#
+# rsync -avh [origen] [destino]
+#
+#------------------------------------------------------------------------------|
+
+dir=$(dirname "$0") # armazenda a localizaçao do script
+
+#--------------------------------------TESTES----------------------------------#
+[ $UID -eq "0" ]   || { echo "Necessita ser root..."; exit 1; } # É Root?
+[ $(which rsync) ] || { echo "Necessita do rsync..."; exit 1; } # Tem o rsync?
+
+[ -e $dir/hd ] && . $dir/hd # Existe o arquivo de configuração?
+
+[ -z $UUID ] && { blkid | awk '{print $1 $2 $3}'; echo ""; echo "Digite o UUID do HD para gravação do backup (utilize os dados acima)"; read UUID; echo "UUID=$UUID" > $dir/hd; } # hd cadastrado?
+
+#------------------------------------VARS--------------------------------------#
+dispositivo_base="$(blkid -U $UUID)"             # NÃO MEXER
+
+## testa se dispositivo está conectado
+[ -z $dispositivo_base ] && { echo "Conecte o dispositivo, $UUID e tente novamente!"; exit 1; }
+
+## testa se dispositivo está montado
+diretorio_de_montagem="$(mount | grep $dispositivo_base | awk '{print $3}')"
+diretorio_de_montagem_sugestao="/mnt/bck"   # Será usado caso o dispositivo não esteja montado
+# monta dispositivo
+[ -z $diretorio_de_montagem ] && { diretorio_de_montagem="$diretorio_de_montagem_sugestao"; \     
+    [ ! -d $diretorio_de_montagem ] && mkdir "$diretorio_de_montagem"; \
+        mount "$dispositivo_base" "$diretorio_de_montagem"; } 2> /dev/null
+
+diretorio_para_envio="/home/"                # Qual diretorio enviar? coloque a 
+log="/var/log/lisa.log"                      # Especifique o local do log
+
+# Ative as opções que desejar, estas opções
+# podem ser ativas em linha caso você não
+# queira ficar mexendo no fonte do programa.
+
+verbose=""     ; [[ "${VERBOSE:-sim}" = "sim" ]]       && verbose="--verbose"           # modo verbose
+update=""      ; [[ "${UPDATE:-sim}" = "sim" ]]        && update="--update"             # pula arquivos se são iguais c/data posterior origem/destino                    
+delete=""      ; [[ "${DELETE:-sim}" = "sim" ]]        && delete="--delete"             # não tem na origem? destino é excluido tambem!      
+human=""       ; [[ "${HUMAN:-sim}" = "sim" ]]         && human="--human-readable"      # leitura para humanos kbytes,mega, giga etc...   
+archive=""     ; [[ "${ARCHIVE:-sim}" = "sim" ]]       && archive="--archive"           # modo de arquivamento, copias de forma recursiva com preservação      
+recursive=""   ; [[ "${RECURSIVE:-nao}" = "sim" ]]     && recursive="--recursive"       # cópia de forma recursiva, não preserva timestamp, permissão    
+compress=""    ; [[ "${COMPRESS:-sim}" = "sim" ]]      && compress="--compress"         # compressão no envio, arquivos mais leves.    
+progress=""    ; [[ "${PROGRESS:-sim}" = "sim" ]]      && progress="--progress"         # ativar progresso no envio     
+linksymbols="" ; [[ "${LINKSYMVOLS:-nao}" = "sim" ]]   && linksymbols="--safe-links"    # ignorar links symbolicos do envio 
+perms=""       ; [[ "${PERMS:-sim}" = "sim" ]]         && perms="--perms"               # preservar permissões dos arquivos/diretorios    
+quiet=""       ; [[ "${QUIET:-nao}" = "sim" ]]         && quiet="--quiet"               # modo silencioso
+
+# Vamos fazer algumas verificações
+# para não dar conflito!
+
+#------------------------------------------------------------------------------#
+# Verificando se DELETE/UPDATE está ativo.
+# Se caso o update está ativo e a opção
+# delete for ativada, não dará muito certo
+#------------------------------------------------------------------------------#
+[[ "$delete" = "--delete" ]] && update="" # Desabilitando update
+[[ "$update" = "--update" ]] && delete="" # Desabilitando delete
+
+#------------------------------------------------------------------------------#
+# Verificando se VERBOSE/QUIET está ativo.
+# Se caso a verbose está ativa e a opção
+# quiet for ativada, não dará muito certo,
+# precisamos desabilitar algum, para não
+# entrar em conflito.
+#------------------------------------------------------------------------------#
+[[ "$verbose" = "--verbose" ]] && quiet="" # Desabilitando quiet
+[[ "$quiet" = "--quiet" ]] && verbose=""   # Desabilitando verbose
+
+#------------------------------------------------------------------------------#
+# Caso deseje Excluir Diretorios ou arquivos
+# que NÃO são necessários, como diretorios
+# de caches e arquivs etc... da sua sincronização
+# desmarque os exclude necessáros e adicione
+# o diretorio ou arquivo...
+# Há um padrão a seguir, siga o padrão para não
+# ter erros, template de exemplo:
+# exclude0="--exclude="*.mp3""
+#------------------------------------------------------------------------------#
+exclude1="--exclude="nestor/.cache/""
+exclude2="--exclude="nestor/s3/""
+exclude3="--exclude="nestor/VirtualBox\ VMs/""
+exclude4="--exclude="nestor/Insync/""
+exclude5="--exclude="nestor/.config/Insync/""
+exclude6="--exclude="nestor/.local/share/Insync/""
+exclude7="--exclude="nestor/.var/app/com.valvesoftware.Steam/Insync/""
+#exclude8=""
+#exclude9=""
+#exclude10=""
+
+#----------------------------------FIM VAR-------------------------------------#
+
+#-----------------------------INICIO DO PROGRAMA-------------------------------#
+
+set -e                                                                      # deu erro parou.
+inicio="$(date +%Y%m%d-%H%M)"                                               # pegando hora de inicio
+montado="$(df -h $dispositivo_base | awk '{ print $6 }' | sed -n '2,$p')"   # dados do diretorio de backup
+
+echo "#-------------------------------------------#" >> "$log"
+echo -e "iniciado em......: $inicio" >> "$log"
+echo -e "dispositivo......: $dispositivo_base"
+echo -e "dispositivo......: $dispositivo_base" >> "$log"
+echo -e "montado em.......: $montado"
+echo -e "montado em.......: $montado" >> "$log"
+echo -e "diretorio........: $diretorio_para_envio"
+echo -e "diretorio........: $diretorio_para_envio" >> "$log"
+
+cd "$diretorio_para_envio"
+
+if  rsync \
+    "$verbose" \
+    "$update" \
+    "$delete" \
+    "$human" \
+    "$archive" \
+    "$recursive" \
+    "$compress" \
+    "$progress" \
+    "$linksymbols" \
+    "$perms" \
+    "$quiet" \
+    "$exclude1" \
+    "$exclude2" \
+    "$exclude3" \
+    "$exclude4" \
+    "$exclude5" \
+    "$exclude6" \
+    "$exclude7" \
+    "$exclude8" \
+    "$exclude9" \
+    "$exclude10" \
+    "$diretorio_para_envio" \
+    "$diretorio_de_montagem"; then
+
+    fim="$(date +%Y%m%d-%H%M)"                                                    # pegando hora de fim
+    tambackup="$(df -h $dispositivo_base | awk '{ print $3 }' | sed -n '2,$p')"   # dados do diretorio de backup
+    usodisco="$(df -h $dispositivo_base  | awk '{ print $5 }' | sed -n '2,$p')"   # dados do diretorio de backup
+    echo ">>backup realizado com sucesso." >> "$log"
+        
+    echo -e ""
+    echo -e "tamanho do backup: $tambackup" >> "$log"
+    echo -e "tamanho do backup: $tambackup"
+    echo -e "uso do disco.....: $usodisco" >> "$log"
+    echo -e "uso do disco.....: $usodisco"
+    echo -e ""
+    echo -e "iniciado em......: $inicio"
+    echo -e "finalizado em....: $fim"
+    echo -e "finalizado em....: $fim" >> "$log"
+    echo "#-------------------------------------------#" >> "$log"
+
+fi
+
+#------------------------------------------------------------------------------#
