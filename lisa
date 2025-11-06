@@ -63,26 +63,113 @@
 dir=$(dirname "$0") # armazenda a localizaçao do script
 
 #--------------------------------------TESTES----------------------------------#
-[ $UID -eq "0" ]   || { echo "Necessita ser root..."; exit 1; } # É Root?
-[ $(which rsync) ] || { echo "Necessita do rsync..."; exit 1; } # Tem o rsync?
+[ "$UID" -eq "0" ]   || { echo "Necessita ser root..."; exit 1; } # É Root?
+command -v rsync >/dev/null 2>&1 || { echo "Necessita do rsync..."; exit 1; } # Tem o rsync?
 
-[ -e $dir/hd ] && . $dir/hd # Existe o arquivo de configuração?
+[ -e "$dir/hd" ] && . "$dir/hd" # Existe o arquivo de configuração?
 
-[ -z $UUID ] && { blkid | awk '{print $1 $2 $3}'; echo ""; echo "Digite o UUID do HD para gravação do backup (utilize os dados acima)"; read UUID; echo "UUID=$UUID" > $dir/hd; } # hd cadastrado?
+[ -z "${UUID:-}" ] && {
+    echo "Dispositivos montados com UUID detectados:";
+    # Saída em pares chave/valor, segura para espaços: NAME="..." UUID="..." MOUNTPOINTS="..." FSTYPE="..." LABEL="..." TYPE="..."
+    # Filtra por entradas com UUID e MOUNTPOINTS definidos e ignora loop/rom
+    mapfile -t devices < <(lsblk -no NAME,UUID,MOUNTPOINTS,FSTYPE,LABEL,TYPE -P 2>/dev/null | awk 'match($0, /UUID="[^"]+"/) && $0 !~ /TYPE="loop"/ && $0 !~ /TYPE="rom"/ && $0 !~ /FSTYPE="ntfs"/ && $0 !~ /FSTYPE="NTFS"/ && $0 !~ /FSTYPE="vfat"/ && $0 !~ /FSTYPE="VFAT"/ && $0 !~ /FSTYPE="swap"/ && $0 !~ /FSTYPE="SWAP"/')
+    # Fallback: usar findmnt + lsblk quando não houver resultados (ou ambientes sem MOUNTPOINTS)
+    if [ "${#devices[@]}" -eq 0 ]; then
+        mapfile -t mounts < <(findmnt -rno SOURCE,TARGET,FSTYPE 2>/dev/null || true)
+        tmp_devices=()
+        for m in "${mounts[@]}"; do
+            src=$(awk '{print $1}' <<<"$m")
+            tgt=$(awk '{print $2}' <<<"$m")
+            fstype=$(awk '{print $3}' <<<"$m")
+            case "$src" in
+                /dev/*) ;; # ok
+                *) continue ;;
+            esac
+            case "$src" in
+                *loop*|*ram*|*zram*) continue ;;
+            esac
+            # Obter NAME/UUID/LABEL via lsblk para o device
+            name=$(lsblk -no NAME "$src" 2>/dev/null | head -n1)
+            uuid=$(lsblk -no UUID "$src" 2>/dev/null | head -n1)
+            label=$(lsblk -no LABEL "$src" 2>/dev/null | head -n1)
+            [ -z "$uuid" ] && continue
+            [ -z "$name" ] && name=$(basename "$src")
+            [ -z "$label" ] && label="-"
+            [ -z "$fstype" ] && fstype=$(lsblk -no FSTYPE "$src" 2>/dev/null | head -n1)
+            case "${fstype:-}" in
+                ntfs|NTFS) continue ;;
+            esac
+            tmp_devices+=("NAME=\"$name\" UUID=\"$uuid\" MOUNTPOINTS=\"$tgt\" FSTYPE=\"$fstype\" LABEL=\"$label\"")
+        done
+        if [ "${#tmp_devices[@]}" -gt 0 ]; then
+            devices=("${tmp_devices[@]}")
+        else
+            # Fallback final: listar todos dispositivos com UUID mesmo sem estar montados
+            mapfile -t devices < <(lsblk -no NAME,UUID,MOUNTPOINTS,FSTYPE,LABEL,TYPE -P 2>/dev/null | awk 'match($0, /UUID="[^"]+"/) && $0 !~ /TYPE="loop"/ && $0 !~ /TYPE="rom"/ && $0 !~ /FSTYPE="ntfs"/ && $0 !~ /FSTYPE="NTFS"/ && $0 !~ /FSTYPE="vfat"/ && $0 !~ /FSTYPE="VFAT"/ && $0 !~ /FSTYPE="swap"/ && $0 !~ /FSTYPE="SWAP"/')
+        fi
+    fi
+    if [ "${#devices[@]}" -eq 0 ]; then
+        echo "Nenhum dispositivo montado com UUID foi encontrado. Conecte e monte o dispositivo e tente novamente.";
+        exit 1;
+    fi
+    idx=1
+    for line in "${devices[@]}"; do
+        # Reset vars and safely evaluate KEY="VALUE" pairs preserving spaces
+        unset NAME UUID MOUNTPOINTS FSTYPE LABEL TYPE
+        eval "$line"
+        name="${NAME:-}"
+        uuid="${UUID:-}"
+        mnt="${MOUNTPOINTS:-}"
+        fstype="${FSTYPE:-}"
+        label="${LABEL:-}"
+        [ -z "$mnt" ] && mnt="-"
+        [ -z "$fstype" ] && fstype="-"
+        [ -z "$label" ] && label="-"
+        echo "[$idx] NAME=$name LABEL=$label UUID=$uuid MOUNTPOINT=$mnt FSTYPE=$fstype"
+        idx=$((idx+1))
+    done
+    echo ""
+    echo "Digite o número do dispositivo para gravação do backup:";
+    read -r choice
+    case "$choice" in
+        ''|*[!0-9]*) echo "Entrada inválida."; exit 1 ;;
+    esac
+    sel_index=$((choice-1))
+    if [ "$sel_index" -lt 0 ] || [ "$sel_index" -ge "${#devices[@]}" ]; then
+        echo "Número fora do intervalo."; exit 1
+    fi
+    selected="${devices[$sel_index]}"
+    unset NAME UUID MOUNTPOINTS FSTYPE LABEL TYPE
+    eval "$selected"
+    LABEL_SEL="${LABEL:-}"
+    [ -z "$LABEL_SEL" ] && LABEL_SEL="-"
+    echo "Você selecionou: LABEL='$LABEL_SEL' UUID='$UUID'"
+    printf "Confirmar cadastro deste dispositivo? (s/N): "
+    read -r confirm
+    case "$confirm" in
+        s|S|y|Y)
+            echo "UUID=$UUID" > "$dir/hd"
+            ;;
+        *)
+            echo "Operação cancelada. Nenhum UUID foi salvo."; exit 1 ;;
+    esac
+} # hd cadastrado?
 
 #------------------------------------VARS--------------------------------------#
-dispositivo_base="$(blkid -U $UUID)"             # NÃO MEXER
+dispositivo_base="$(blkid -U "$UUID" 2>/dev/null || true)"             # NÃO MEXER
 
 ## testa se dispositivo está conectado
-[ -z $dispositivo_base ] && { echo "Conecte o dispositivo, $UUID e tente novamente!"; exit 1; }
+[ -z "$dispositivo_base" ] && { echo "Conecte o dispositivo, $UUID e tente novamente!"; exit 1; }
 
 ## testa se dispositivo está montado
-diretorio_de_montagem="$(mount | grep $dispositivo_base | awk '{print $3}')"
+diretorio_de_montagem="$(mount | grep -F -- "$dispositivo_base" | awk '{print $3}')"
 diretorio_de_montagem_sugestao="/mnt/bck"   # Será usado caso o dispositivo não esteja montado
 # monta dispositivo
-[ -z $diretorio_de_montagem ] && { diretorio_de_montagem="$diretorio_de_montagem_sugestao"; \     
-    [ ! -d $diretorio_de_montagem ] && mkdir "$diretorio_de_montagem"; \
-        mount "$dispositivo_base" "$diretorio_de_montagem"; } 2> /dev/null
+if [ -z "$diretorio_de_montagem" ]; then
+    diretorio_de_montagem="$diretorio_de_montagem_sugestao"
+    [ ! -d "$diretorio_de_montagem" ] && mkdir -p "$diretorio_de_montagem"
+    mount "$dispositivo_base" "$diretorio_de_montagem" 2>/dev/null || true
+fi
 
 diretorio_para_envio="/home/"                # Qual diretorio enviar? coloque a 
 log="/var/log/lisa.log"                      # Especifique o local do log
@@ -99,7 +186,7 @@ archive=""     ; [[ "${ARCHIVE:-sim}" = "sim" ]]       && archive="--archive"   
 recursive=""   ; [[ "${RECURSIVE:-nao}" = "sim" ]]     && recursive="--recursive"       # cópia de forma recursiva, não preserva timestamp, permissão    
 compress=""    ; [[ "${COMPRESS:-sim}" = "sim" ]]      && compress="--compress"         # compressão no envio, arquivos mais leves.    
 progress=""    ; [[ "${PROGRESS:-sim}" = "sim" ]]      && progress="--progress"         # ativar progresso no envio     
-linksymbols="" ; [[ "${LINKSYMVOLS:-nao}" = "sim" ]]   && linksymbols="--safe-links"    # ignorar links symbolicos do envio 
+linksymbols="" ; [[ "${LINKSYMBOLS:-nao}" = "sim" ]]   && linksymbols="--safe-links"    # ignorar links symbolicos do envio 
 perms=""       ; [[ "${PERMS:-sim}" = "sim" ]]         && perms="--perms"               # preservar permissões dos arquivos/diretorios    
 quiet=""       ; [[ "${QUIET:-nao}" = "sim" ]]         && quiet="--quiet"               # modo silencioso
 
@@ -132,27 +219,28 @@ quiet=""       ; [[ "${QUIET:-nao}" = "sim" ]]         && quiet="--quiet"       
 # o diretorio ou arquivo...
 # Há um padrão a seguir, siga o padrão para não
 # ter erros, template de exemplo:
-# exclude0="--exclude="*.mp3""
+# exclude0="--exclude=*.mp3"
 #------------------------------------------------------------------------------#
-exclude1="--exclude="nestor/.cache/""
-exclude2="--exclude="nestor/s3/""
-exclude3="--exclude="nestor/VirtualBox\ VMs/""
-exclude4="--exclude="nestor/Insync/""
-exclude5="--exclude="nestor/.config/Insync/""
-exclude6="--exclude="nestor/.local/share/Insync/""
-exclude7="--exclude="nestor/.var/app/com.valvesoftware.Steam/Insync/""
-#exclude8=""
-#exclude9=""
-#exclude10=""
+exclude1="--exclude=nestor/.cache/"
+exclude2="--exclude=nestor/s3/"
+exclude3="--exclude=nestor/VirtualBox VMs/"
+exclude4="--exclude=nestor/Insync/"
+exclude5="--exclude=nestor/.config/Insync/"
+exclude6="--exclude=nestor/.local/share/Insync/"
+exclude7="--exclude=nestor/.var/app/com.valvesoftware.Steam/Insync/"
+exclude8="--exclude=nestor/AppImages/"
+exclude9="--exclude=nestor/Projetos-github/"
+exclude10="--exclude=timeshift/"
 
 #----------------------------------FIM VAR-------------------------------------#
 
 #-----------------------------INICIO DO PROGRAMA-------------------------------#
 
-set -e                                                                      # deu erro parou.
+set -euo pipefail                                                            # deu erro parou.
 inicio="$(date +%Y%m%d-%H%M)"                                               # pegando hora de inicio
 montado="$(df -h $dispositivo_base | awk '{ print $6 }' | sed -n '2,$p')"   # dados do diretorio de backup
 
+mkdir -p "$(dirname "$log")"
 echo "#-------------------------------------------#" >> "$log"
 echo -e "iniciado em......: $inicio" >> "$log"
 echo -e "dispositivo......: $dispositivo_base"
@@ -164,30 +252,37 @@ echo -e "diretorio........: $diretorio_para_envio" >> "$log"
 
 cd "$diretorio_para_envio"
 
-if  rsync \
-    "$verbose" \
-    "$update" \
-    "$delete" \
-    "$human" \
-    "$archive" \
-    "$recursive" \
-    "$compress" \
-    "$progress" \
-    "$linksymbols" \
-    "$perms" \
-    "$quiet" \
-    "$exclude1" \
-    "$exclude2" \
-    "$exclude3" \
-    "$exclude4" \
-    "$exclude5" \
-    "$exclude6" \
-    "$exclude7" \
-    "$exclude8" \
-    "$exclude9" \
-    "$exclude10" \
-    "$diretorio_para_envio" \
-    "$diretorio_de_montagem"; then
+# Monta opções do rsync evitando argumentos vazios
+rsync_opts=()
+[ -n "$verbose" ]      && rsync_opts+=("$verbose")
+[ -n "$update" ]       && rsync_opts+=("$update")
+[ -n "$delete" ]       && rsync_opts+=("$delete")
+[ -n "$human" ]        && rsync_opts+=("$human")
+[ -n "$archive" ]      && rsync_opts+=("$archive")
+[ -n "$recursive" ]    && rsync_opts+=("$recursive")
+[ -n "$compress" ]     && rsync_opts+=("$compress")
+[ -n "$progress" ]     && rsync_opts+=("$progress")
+[ -n "$linksymbols" ]  && rsync_opts+=("$linksymbols")
+[ -n "$perms" ]        && rsync_opts+=("$perms")
+[ -n "$quiet" ]        && rsync_opts+=("$quiet")
+[ -n "${exclude1:-}" ] && rsync_opts+=("$exclude1")
+[ -n "${exclude2:-}" ] && rsync_opts+=("$exclude2")
+[ -n "${exclude3:-}" ] && rsync_opts+=("$exclude3")
+[ -n "${exclude4:-}" ] && rsync_opts+=("$exclude4")
+[ -n "${exclude5:-}" ] && rsync_opts+=("$exclude5")
+[ -n "${exclude6:-}" ] && rsync_opts+=("$exclude6")
+[ -n "${exclude7:-}" ] && rsync_opts+=("$exclude7")
+[ -n "${exclude8:-}" ] && rsync_opts+=("$exclude8")
+[ -n "${exclude9:-}" ] && rsync_opts+=("$exclude9")
+[ -n "${exclude10:-}" ] && rsync_opts+=("$exclude10")
+
+# valida origem/destino antes de chamar rsync
+if [ -z "${diretorio_para_envio:-}" ] || [ -z "${diretorio_de_montagem:-}" ]; then
+    echo "Erro: origem ou destino vazio (diretorio_para_envio/diretorio_de_montagem)." >&2
+    exit 1
+fi
+
+if  rsync "${rsync_opts[@]}" "$diretorio_para_envio" "$diretorio_de_montagem"; then
 
     fim="$(date +%Y%m%d-%H%M)"                                                    # pegando hora de fim
     tambackup="$(df -h $dispositivo_base | awk '{ print $3 }' | sed -n '2,$p')"   # dados do diretorio de backup
