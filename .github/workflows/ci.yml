@@ -27,8 +27,17 @@ jobs:
 
       - name: Executar ShellCheck
         run: |
-          shellcheck -x lisa || true
-          shellcheck -S warning lisa
+          # Criar arquivo hd mock para evitar avisos do ShellCheck sobre arquivo não encontrado
+          # O arquivo hd é criado dinamicamente na primeira execução do script
+          echo "# Arquivo de configuração mock para CI/CD" > hd
+          echo "UUID=" >> hd
+          # Executar ShellCheck ignorando avisos sobre arquivos externos carregados dinamicamente
+          # SC1090: Can't follow non-constant source (arquivo hd carregado com . ou source)
+          # SC1091: Not following: file not accessible
+          shellcheck -x -e SC1090,SC1091 lisa || true
+          shellcheck -S warning -e SC1090,SC1091 lisa
+          # Limpar arquivo mock após os testes
+          rm -f hd
 
       - name: Validar sintaxe Bash
         run: |
@@ -66,6 +75,8 @@ jobs:
 
       - name: Testar sintaxe e estrutura
         run: |
+          # Criar arquivo hd mock necessário para os testes (arquivo criado dinamicamente)
+          echo "UUID=" > hd
           # Testar que o script não falha imediatamente sem ser root
           bash -n lisa
           
@@ -75,6 +86,8 @@ jobs:
           grep -q 'UUID' lisa || exit 1
           
           echo "✓ Estrutura do script validada"
+          # Limpar arquivo mock
+          rm -f hd
 
       - name: Verificar funções críticas
         run: |
