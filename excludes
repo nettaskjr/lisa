@@ -1,0 +1,20 @@
+# Arquivo de exclusões para o rsync
+# Formato: um padrão por linha
+# Linhas começando com # são comentários e serão ignoradas
+# Exemplos:
+#   nestor/.cache/
+#   nestor/s3/
+#   *.mp3
+#   nestor/VirtualBox VMs/
+
+nestor/.cache/
+nestor/s3/
+nestor/VirtualBox VMs/
+nestor/Insync/
+nestor/.config/Insync/
+nestor/.local/share/Insync/
+nestor/.var/app/com.valvesoftware.Steam/Insync/
+nestor/AppImages/
+nestor/Projetos-github/
+timeshift/
+

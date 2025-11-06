@@ -66,7 +66,12 @@ dir=$(dirname "$0") # armazenda a localizaçao do script
 [ "$UID" -eq "0" ]   || { echo "Necessita ser root..."; exit 1; } # É Root?
 command -v rsync >/dev/null 2>&1 || { echo "Necessita do rsync..."; exit 1; } # Tem o rsync?
 
-[ -e "$dir/hd" ] && . "$dir/hd" # Existe o arquivo de configuração?
+# Verificar se está instalado no sistema (prioriza /etc/lisa/hd, depois diretório local)
+if [ -e "/etc/lisa/hd" ]; then
+    . "/etc/lisa/hd"
+elif [ -e "$dir/hd" ]; then
+    . "$dir/hd"
+fi
 
 [ -z "${UUID:-}" ] && {
     echo "Dispositivos montados com UUID detectados:";
@@ -148,7 +153,14 @@ command -v rsync >/dev/null 2>&1 || { echo "Necessita do rsync..."; exit 1; } # 
     read -r confirm
     case "$confirm" in
         s|S|y|Y)
-            echo "UUID=$UUID" > "$dir/hd"
+            # Se instalado no sistema, usar /etc/lisa/hd, senão usar diretório local
+            if [ -f "/usr/local/bin/lisa" ] || [ -f "/usr/bin/lisa" ]; then
+                mkdir -p "/etc/lisa"
+                echo "UUID=$UUID" > "/etc/lisa/hd"
+                chmod 600 "/etc/lisa/hd"
+            else
+                echo "UUID=$UUID" > "$dir/hd"
+            fi
             ;;
         *)
             echo "Operação cancelada. Nenhum UUID foi salvo."; exit 1 ;;
@@ -212,25 +224,30 @@ quiet=""       ; [[ "${QUIET:-nao}" = "sim" ]]         && quiet="--quiet"       
 [[ "$quiet" = "--quiet" ]] && verbose=""   # Desabilitando verbose
 
 #------------------------------------------------------------------------------#
-# Caso deseje Excluir Diretorios ou arquivos
-# que NÃO são necessários, como diretorios
-# de caches e arquivs etc... da sua sincronização
-# desmarque os exclude necessáros e adicione
-# o diretorio ou arquivo...
-# Há um padrão a seguir, siga o padrão para não
-# ter erros, template de exemplo:
-# exclude0="--exclude=*.mp3"
+# Carrega excludes do arquivo excludes
+# O arquivo pode estar no diretório do script ou em /etc/lisa/excludes
+# Formato: um padrão por linha, linhas começando com # são comentários
 #------------------------------------------------------------------------------#
-exclude1="--exclude=nestor/.cache/"
-exclude2="--exclude=nestor/s3/"
-exclude3="--exclude=nestor/VirtualBox VMs/"
-exclude4="--exclude=nestor/Insync/"
-exclude5="--exclude=nestor/.config/Insync/"
-exclude6="--exclude=nestor/.local/share/Insync/"
-exclude7="--exclude=nestor/.var/app/com.valvesoftware.Steam/Insync/"
-exclude8="--exclude=nestor/AppImages/"
-exclude9="--exclude=nestor/Projetos-github/"
-exclude10="--exclude=timeshift/"
+excludes_file=""
+if [ -f "/etc/lisa/excludes" ]; then
+    excludes_file="/etc/lisa/excludes"
+elif [ -f "$dir/excludes" ]; then
+    excludes_file="$dir/excludes"
+fi
+
+# Array para armazenar os excludes
+excludes_array=()
+
+if [ -n "$excludes_file" ] && [ -r "$excludes_file" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        # Remove espaços em branco no início e fim
+        line=$(echo "$line" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+        # Ignora linhas vazias e comentários
+        if [ -n "$line" ] && [ "${line#\#}" = "$line" ]; then
+            excludes_array+=("--exclude=$line")
+        fi
+    done < "$excludes_file"
+fi
 
 #----------------------------------FIM VAR-------------------------------------#
 
@@ -265,16 +282,10 @@ rsync_opts=()
 [ -n "$linksymbols" ]  && rsync_opts+=("$linksymbols")
 [ -n "$perms" ]        && rsync_opts+=("$perms")
 [ -n "$quiet" ]        && rsync_opts+=("$quiet")
-[ -n "${exclude1:-}" ] && rsync_opts+=("$exclude1")
-[ -n "${exclude2:-}" ] && rsync_opts+=("$exclude2")
-[ -n "${exclude3:-}" ] && rsync_opts+=("$exclude3")
-[ -n "${exclude4:-}" ] && rsync_opts+=("$exclude4")
-[ -n "${exclude5:-}" ] && rsync_opts+=("$exclude5")
-[ -n "${exclude6:-}" ] && rsync_opts+=("$exclude6")
-[ -n "${exclude7:-}" ] && rsync_opts+=("$exclude7")
-[ -n "${exclude8:-}" ] && rsync_opts+=("$exclude8")
-[ -n "${exclude9:-}" ] && rsync_opts+=("$exclude9")
-[ -n "${exclude10:-}" ] && rsync_opts+=("$exclude10")
+# Adiciona excludes do array
+for exclude in "${excludes_array[@]}"; do
+    rsync_opts+=("$exclude")
+done
 
 # valida origem/destino antes de chamar rsync
 if [ -z "${diretorio_para_envio:-}" ] || [ -z "${diretorio_de_montagem:-}" ]; then
