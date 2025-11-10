@@ -66,13 +66,6 @@ dir=$(dirname "$0") # armazenda a localizaçao do script
 [ "$UID" -eq "0" ]   || { echo "Necessita ser root..."; exit 1; } # É Root?
 command -v rsync >/dev/null 2>&1 || { echo "Necessita do rsync..."; exit 1; } # Tem o rsync?
 
-# Verificar se está instalado no sistema (prioriza /etc/lisa/hd, depois diretório local)
-if [ -e "/etc/lisa/hd" ]; then
-    . "/etc/lisa/hd"
-elif [ -e "$dir/hd" ]; then
-    . "$dir/hd"
-fi
-
 [ -z "${UUID:-}" ] && {
     echo "Dispositivos montados com UUID detectados:";
     # Saída em pares chave/valor, segura para espaços: NAME="..." UUID="..." MOUNTPOINTS="..." FSTYPE="..." LABEL="..." TYPE="..."
@@ -224,16 +217,10 @@ quiet=""       ; [[ "${QUIET:-nao}" = "sim" ]]         && quiet="--quiet"       
 [[ "$quiet" = "--quiet" ]] && verbose=""   # Desabilitando verbose
 
 #------------------------------------------------------------------------------#
-# Carrega excludes do arquivo excludes
 # O arquivo pode estar no diretório do script ou em /etc/lisa/excludes
 # Formato: um padrão por linha, linhas começando com # são comentários
 #------------------------------------------------------------------------------#
-excludes_file=""
-if [ -f "/etc/lisa/excludes" ]; then
-    excludes_file="/etc/lisa/excludes"
-elif [ -f "$dir/excludes" ]; then
-    excludes_file="$dir/excludes"
-fi
+excludes_file="$dir/excludes"
 
 # Array para armazenar os excludes
 excludes_array=()
